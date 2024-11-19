@@ -7,6 +7,7 @@ public class ProcessClass {
     private boolean completed;
     private boolean added;
     private boolean blocked;
+    private boolean paused;
 
 
     public ProcessClass(int id, int cpuTime, int memory, int arrivalTime, int priority) {
@@ -56,8 +57,14 @@ public class ProcessClass {
     public boolean isBlocked() {
         return blocked;
     }
-    public void setBlocked(boolean blocked) {
+    public void setBlocked(boolean blocked)  {
         this.blocked = blocked;
+    }
+    public boolean isPaused() {
+        return paused;
+    }
+    public void setPaused(boolean paused) {
+        this.paused = paused;
     }
     @Override
     public String toString() {

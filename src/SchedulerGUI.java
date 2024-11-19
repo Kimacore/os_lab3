@@ -19,6 +19,8 @@
             private final int max_memory = 600;
             private int currentId = 0;
             private int availableMemory = max_memory;
+            private volatile int systemTime = 0;
+            private boolean running = true;
 
 
             public SchedulerGUI() {
@@ -145,6 +147,10 @@
                     public void actionPerformed(ActionEvent e) {
                         processListArea2.setText("");
                         String selectedAlgorithm = (String) algorithmComboBox.getSelectedItem();
+                        systemTime = 0;
+                        updateSystemTime(systemTime);
+                        running = true;
+                        startSystemClock();
                         if (selectedAlgorithm.equals("FCFS")) {
                             runFCFS();
                         } else if (selectedAlgorithm.equals("Priority")) {
@@ -190,7 +196,7 @@
             }
 
 
-            private void updateSystemTime(int time) {
+            private synchronized void updateSystemTime(int time) {
                 SwingUtilities.invokeLater(() -> timeLabel.setText("System Time: " + time));
             }
 
@@ -206,8 +212,11 @@
                 for (ProcessClass process : processList) {
                     process.setCompleted(false);
                     process.setAdded(false);
+                    process.setBlocked(false);
+                    process.setPaused(false);
                 }
             }
+
 
             public void runFCFS() {
                 new Thread(() -> {
@@ -284,77 +293,130 @@
 
             }
 
-            public void runPriorityScheduling() {
+            public void startSystemClock() {
                 new Thread(() -> {
-                    int systemTime = 0;
-                    resetProcessFlags();
-                    updateSystemTime(systemTime);
-                    PriorityQueue<ProcessClass> availableProcesses =
-                            new PriorityQueue<ProcessClass>(Comparator.comparingInt(ProcessClass::getPriority)
-                                    .thenComparing(ProcessClass::getArrivalTime));
-                    while (true) {
-                        for (ProcessClass process : processList) {
-                            if (process.getArrivalTime() <= systemTime && !process.isCompleted() && !process.isAdded()) {
-                                if (max_memory - process.getMemory() < 0 && !process.isBlocked()) {
-                                    SwingUtilities.invokeLater(() -> processListArea2.append("Process with ID" + process.getId() + "has more memory than the limit\n"));
-                                    process.setBlocked(true);
 
-                                }
-                                if (availableMemory - process.getMemory() < 0 && !process.isBlocked()) {
-                                    process.setBlocked(true);
-                                }
-                                else {
-                                    availableProcesses.add(process);
-                                    process.setAdded(true);
-
-                                }
-
-                            }
-                        }
-                        if (!availableProcesses.isEmpty()) {
-                            ProcessClass currentProcess = availableProcesses.poll(); // Берем первый процесс из доступных
-                            SwingUtilities.invokeLater(() -> processListArea2.append("Preparing the process with ID: " + currentProcess.getId() + "\n"));
-                            try {
-                                Thread.sleep(1000);
-                                systemTime++;
-                                updateSystemTime(systemTime);
-                            } catch (InterruptedException e) {
-                                e.printStackTrace();
-                            }
-                            SwingUtilities.invokeLater(() -> processListArea2.append("Running the process with ID: " + currentProcess.getId() + "\n"));
-                            for (int i = 0; i < currentProcess.getCpuTime(); i++) {
-                                try {
-                                    Thread.sleep(1000);
-                                    systemTime++;
-                                    updateSystemTime(systemTime);
-                                } catch (InterruptedException e) {
-                                    e.printStackTrace();
-                                }
-                            }
-                            currentProcess.setCompleted(true);
-                            SwingUtilities.invokeLater(() -> processListArea2.append("Process ID: " + currentProcess.getId() + " completed.\n"));
-                        } else {
-                            boolean allCompleted = true;
-                            for (ProcessClass process : processList) {
-                                if (!process.isCompleted()) {
-                                    allCompleted = false;
-                                    break;
-                                }
-                            }
-                            if (allCompleted) {
-                                break;
-                            }
-                            try {
-                                Thread.sleep(1000);
-                                systemTime++;
-                                updateSystemTime(systemTime);
-                            } catch (InterruptedException e) {
-                                e.printStackTrace();
-                            }
+                    while (running) {
+                        try {
+                            Thread.sleep(1000); // Увеличиваем время каждую секунду
+                            systemTime++; // Увеличиваем системное время
+                            updateSystemTime(systemTime); // Обновляем метку времени в интерфейсе
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
                         }
                     }
                 }).start();
             }
+
+            // Метод для запуска планирования с приоритетами
+            public void runPriorityScheduling() {
+                PriorityQueue<ProcessClass> availableProcesses =
+                        new PriorityQueue<>(Comparator.comparingInt(ProcessClass::getPriority)
+                                .thenComparing(ProcessClass::getArrivalTime));
+
+                resetProcessFlags();
+
+                // Поток для добавления процессов в очередь
+                Thread queueFillerThread = new Thread(() -> {
+                    while (true) {
+                        for (ProcessClass process : processList) {
+                            synchronized (this) {
+                                if (process.getArrivalTime() <= systemTime && !process.isCompleted() && !process.isAdded() && !process.isBlocked()) {
+                                    if (max_memory - process.getMemory() < 0) {
+                                        SwingUtilities.invokeLater(() -> appendWithTimestamp("Process with ID " +
+                                                process.getId() + " exceeds the maximum memory limit and will be blocked."));
+                                        process.setBlocked(true);
+                                        process.setCompleted(true);
+                                    } else if (availableMemory - process.getMemory() < 0) {
+                                        if (!process.isPaused()) {
+                                            SwingUtilities.invokeLater(() -> appendWithTimestamp("Process with ID " +
+                                                    process.getId() + " is postponed due to insufficient memory."));
+                                            process.setPaused(true);
+                                        }
+                                    } else {
+                                        availableProcesses.add(process);
+                                        process.setAdded(true);
+                                        availableMemory -= process.getMemory();
+                                        SwingUtilities.invokeLater(() -> appendWithTimestamp(
+                                                "Process with ID " + process.getId() + " added to execution queue.\n"));
+                                    }
+                                }
+                            }
+                        }
+
+                        // Проверяем, завершены ли все процессы
+                        synchronized (this) {
+                            if (processList.stream().allMatch(ProcessClass::isCompleted)) {
+                                break;
+                            }
+                        }
+
+                        // Периодичность добавления — 1 секунда
+                        sleep(1000);
+                    }
+                });
+
+                // Поток для выполнения процессов
+                Thread executionThread = new Thread(() -> {
+                    while (true) {
+                        ProcessClass currentProcess;
+                        synchronized (this) {
+                            currentProcess = availableProcesses.poll();
+                        }
+
+                        if (currentProcess != null) {
+                            SwingUtilities.invokeLater(() -> appendWithTimestamp("Preparing the process with ID: "
+                                    + currentProcess.getId() + "\n"));
+                            sleep(500);
+                            SwingUtilities.invokeLater(() -> appendWithTimestamp("Running the process with ID: " +
+                                    currentProcess.getId() + "\n"));
+                            for (int i = 0; i < currentProcess.getCpuTime(); i++) {
+                                sleep(1000);
+                                synchronized (this) {
+                                    updateSystemTime(systemTime); // Обновляем метку времени
+                                }
+                            }
+                            currentProcess.setCompleted(true);
+                            SwingUtilities.invokeLater(() -> appendWithTimestamp("Process ID: " + currentProcess.getId()
+                                    + " completed.\n"));
+                            synchronized (this) {
+                                availableMemory += currentProcess.getMemory();
+                            }
+                            SwingUtilities.invokeLater(() -> appendWithTimestamp(
+                                    "Memory released by process ID: " + currentProcess.getId() +
+                                            ". Available memory: " + availableMemory + ".\n"));
+                        } else {
+                            // Проверяем, завершены ли все процессы
+                            synchronized (this) {
+                                if (processList.stream().allMatch(ProcessClass::isCompleted)) {
+                                    running = false; // Останавливаем поток времени
+                                    break;
+                                }
+                            }
+                            sleep(1000); // Если очередь пуста, ждем
+                        }
+                    }
+                });
+
+                // Запуск потоков
+                queueFillerThread.start();
+                executionThread.start();
+            }
+
+            // Метод для сна (задержки)
+            private void sleep(int ms) {
+                try {
+                    Thread.sleep(ms);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+
+            private synchronized void appendWithTimestamp(String message) {
+                String timestampedMessage = message + " (" + systemTime + " sec.)\n";
+                SwingUtilities.invokeLater(() -> processListArea2.append(timestampedMessage));
+            }
+
             public static void main(String[] args) {
                 new SchedulerGUI();
             }
